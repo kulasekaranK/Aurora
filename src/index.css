@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background-color: #f4f7ff;
+    color: #1a365d;
+  }
+  h1, h2, h3, .font-display {
+    font-family: 'Playfair Display', Georgia, serif;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-aurora-accent text-white font-body font-medium px-6 py-2.5 rounded transition-all duration-200 hover:bg-red-700 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply bg-aurora-blue text-white font-body font-medium px-6 py-2.5 rounded transition-all duration-200 hover:bg-aurora-mid active:scale-95;
+  }
+  .btn-outline {
+    @apply border-2 border-aurora-blue text-aurora-blue font-body font-medium px-6 py-2.5 rounded transition-all duration-200 hover:bg-aurora-blue hover:text-white active:scale-95;
+  }
+  .card {
+    @apply bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200;
+  }
+  .input-field {
+    @apply w-full border border-gray-200 rounded px-3 py-2.5 text-sm font-body focus:outline-none focus:ring-2 focus:ring-aurora-mid focus:border-transparent transition-all;
+  }
+  .section-title {
+    @apply font-display text-2xl md:text-3xl text-aurora-navy font-bold;
+  }
+  .skeleton {
+    background: linear-gradient(90deg, #e8eef8 25%, #d0daf0 50%, #e8eef8 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.6s infinite linear;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f4f7ff; }
+::-webkit-scrollbar-thumb { background: #9eb3d8; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #1a365d; }
+
+/* Product image placeholder gradient cycles */
+.product-img-0 { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+.product-img-1 { background: linear-gradient(135deg, #0f2444 0%, #c8392b 100%); }
+.product-img-2 { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
+.product-img-3 { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+.product-img-4 { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+.product-img-5 { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+.product-img-6 { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+.product-img-7 { background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%); }
