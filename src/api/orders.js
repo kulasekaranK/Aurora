@@ -1,6 +1,5 @@
 import { apiClient } from './auth.js'
 
-// Generate consistent price from ItemID
 const getItemPrice = (item) => {
   const price = parseFloat(item?.price || item?.UnitCost || 0)
   if (price > 0) return price
@@ -15,12 +14,9 @@ export const createOrder = async ({
   shippingAddress,
   shipNode,
   customerId,
-  paymentToken,      // pm_xxx
-  paymentGateway,    // 'STRIPE'
-  amount,            // authorization amount
+  paymentInfo,   // { paymentToken: pm_xxx, paymentIntentId: pi_xxx, amount }
 }) => {
   const orderableItems = cartItems.filter(item => !item.IsModelItem)
-
   if (orderableItems.length === 0) {
     throw new Error('All items require variant selection.')
   }
@@ -82,53 +78,44 @@ export const createOrder = async ({
     },
   }
 
-  if (isBopis) {
-    payload.ShipNode = shipNode
+  if (isBopis) payload.ShipNode = shipNode
+
+  // ── Include Stripe authorization directly in createOrder ──────────────────
+  // This ensures ChargeSequence=1 and HoldAgainstBook=Y are set at creation,
+  // so OMS knows to collect after invoicing (Awaiting collections = amount).
+  // Mirrors the blog's wallet pattern: both CREATE_ORDER and AUTHORIZATION
+  // are immediately CHECKED at order creation time.
+if (paymentInfo) {
+  const expiryDate = '2026-12-31T23:59:59'
+  const amountStr = paymentInfo.amount.toFixed(2)
+
+  payload.PaymentMethods = {
+    PaymentMethod: [{
+      PaymentType: 'STRIPE_CARD',
+      ChargeSequence: '0',
+      UnlimitedCharges: 'N',
+      MaxChargeLimit: amountStr,
+      PaymentReference1: paymentInfo.paymentToken,
+      PaymentReference2: 'STRIPE',
+      PaymentReference3: 'AUTHORIZED',
+      FirstName: customerInfo.firstName,
+      LastName: customerInfo.lastName,
+
+      PaymentDetails: {
+        ChargeType: 'AUTHORIZATION',
+        RequestAmount: amountStr,
+        ProcessedAmount: amountStr,
+        AuthorizationID: paymentInfo.paymentIntentId,
+        AuthCode: 'AUTH_SUCCESS',
+        AuthorizationExpirationDate: expiryDate
+      }
+    }]
   }
+  payload.PaymentStatus = 'AUTHORIZED'
+}
 
-  // ── Attach Stripe token atomically during order creation ──
-  if (paymentToken && amount > 0) {
-    const amountStr = amount.toFixed(2)
-    payload.PaymentMethods = {
-      PaymentMethod: [
-        {
-          PaymentType: 'CREDIT_CARD',
-          ChargeSequence: '1',
-          PaymentReference1: paymentToken,               // pm_xxx
-          PaymentReference2: paymentGateway || 'STRIPE',
-          PaymentReference3: 'PENDING_AUTH',
-          DisplayCreditCardNo: '****',
-          CreditCardNo: '************',                // masked — NEVER the token
-          SvcNo: '',                                   // CVV only
-          RequestedChargeAmount: amountStr,
-          MaxChargeLimit: amountStr,
-          UnlimitedCharges: 'N',
-          PaymentDetailsList: {
-            PaymentDetails: [
-              {
-                ChargeType: 'AUTHORIZATION',
-                RequestAmount: amountStr,
-                ProcessedAmount: '0.00',
-                RequestProcessed: 'N',
-                HoldAgainstBook: 'Y',
-              },
-            ],
-          },
-          PersonInfoBillTo: {
-            FirstName: customerInfo.firstName,
-            LastName: customerInfo.lastName,
-            EMailID: customerInfo.email,
-            DayPhone: customerInfo.phone || '',
-          },
-        },
-      ],
-    }
-  }
-
-  console.log('createOrder payload', payload)
-
+  console.log('createOrder payload', JSON.stringify(payload, null, 2))
   const res = await apiClient.post('/invoke/createOrder', payload)
-
   return {
     ...res.data,
     calculatedTotal: lineSubTotal.toFixed(2),
@@ -152,11 +139,7 @@ export const fetchOrderByNo = async (orderNo) => {
     return detailRes.data
   } catch {
     const searchRes = await apiClient.get('/order', {
-      params: {
-        OrderNo: orderNo.trim(),
-        EnterpriseCode: 'Aurora',
-        MaximumRecords: 1,
-      },
+      params: { OrderNo: orderNo.trim(), EnterpriseCode: 'Aurora', MaximumRecords: 1 },
     })
     const data = Array.isArray(searchRes.data) ? searchRes.data[0] : searchRes.data
     if (!data) throw new Error('Order not found')
@@ -166,11 +149,7 @@ export const fetchOrderByNo = async (orderNo) => {
 
 export const fetchMyOrders = async (email, max = 50) => {
   const res = await apiClient.get('/order', {
-    params: {
-      EnterpriseCode: 'Aurora',
-      CustomerEMailID: email,
-      MaximumRecords: max,
-    },
+    params: { EnterpriseCode: 'Aurora', CustomerEMailID: email, MaximumRecords: max },
   })
   return Array.isArray(res.data) ? res.data : [res.data].filter(Boolean)
 }

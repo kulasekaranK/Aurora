@@ -6,7 +6,13 @@ import { useAuth } from '../context/AuthContext.jsx'
 import { createOrder } from '../api/orders.js'
 import { fetchStores } from '../api/stores.js'
 import { getCustomerAddresses } from '../api/customer.js'
-import { getStripe, tokenizeCard, savePaymentTokenToOMS } from '../api/payment.js'
+import {
+  getStripe,
+  tokenizeCard,
+  createStripeAuthorization,
+  handle3DSChallenge,
+  saveAuthorizedPaymentToOMS,    // ← single call replaces the others
+} from '../api/payment.js'
 
 const STEPS = ['Customer Info', 'Shipping', 'Payment', 'Review']
 
@@ -30,9 +36,7 @@ const Field = ({ label, name, value, onChange, type = 'text', required, placehol
 )
 
 // ---------------------------------------------------------------------------
-// StripeCardForm — collects card and returns a pm_xxx token.
-// Must be rendered inside <Elements> so useStripe / useElements work.
-// Does NOT authorize — OMS does that with the token later.
+// StripeCardForm — collects card and tokenizes it (returns pm_xxx).
 // ---------------------------------------------------------------------------
 function StripeCardForm({ amount, customerInfo, onSuccess, onFailure }) {
   const stripe = useStripe()
@@ -52,8 +56,6 @@ function StripeCardForm({ amount, customerInfo, onSuccess, onFailure }) {
         customerInfo,
       })
 
-      // paymentMethod.id === 'pm_xxx'
-      // Hand the token up — no authorization happened here.
       onSuccess({
         paymentToken: paymentMethod.id,
         last4: paymentMethod.card?.last4 ?? '****',
@@ -70,14 +72,13 @@ function StripeCardForm({ amount, customerInfo, onSuccess, onFailure }) {
 
   return (
     <div className="space-y-5">
-      {/* Amount display */}
       <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
         <div className="flex items-center justify-between mb-4">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400 font-mono">Order Total</p>
             <p className="font-display text-3xl font-bold text-slate-900 mt-1">${amount.toFixed(2)}</p>
             <p className="text-xs text-slate-500 mt-1">
-              OMS will authorize this amount after order is placed
+              Stripe will authorize this amount when you place the order
             </p>
           </div>
           <div className="text-right">
@@ -86,7 +87,6 @@ function StripeCardForm({ amount, customerInfo, onSuccess, onFailure }) {
           </div>
         </div>
 
-        {/* Stripe CardElement — PCI-compliant inline card input */}
         <div className="rounded-xl border border-slate-200 bg-white px-4 py-3.5">
           <CardElement
             options={{
@@ -105,7 +105,6 @@ function StripeCardForm({ amount, customerInfo, onSuccess, onFailure }) {
         </div>
       </div>
 
-      {/* Test mode hint */}
       <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
         <p className="font-semibold mb-1">🧪 Test Mode</p>
         <p className="text-xs">
@@ -130,8 +129,7 @@ function StripeCardForm({ amount, customerInfo, onSuccess, onFailure }) {
       </button>
 
       <p className="text-center text-xs text-slate-400">
-        Your card details are tokenized by Stripe and never touch our servers.
-        OMS will authorize the amount when your order is confirmed.
+        Card details are tokenized by Stripe and never touch our servers.
       </p>
     </div>
   )
@@ -144,8 +142,8 @@ export default function Checkout() {
   const [stripePromise] = useState(() => getStripe())
 
   const [paymentDone, setPaymentDone] = useState(false)
-  const [paymentToken, setPaymentToken] = useState(null)   // pm_xxx
-  const [cardSummary, setCardSummary] = useState(null)     // { last4, brand }
+  const [paymentToken, setPaymentToken] = useState(null)
+  const [cardSummary, setCardSummary] = useState(null)
   const [paymentError, setPaymentError] = useState(null)
 
   const { items, subtotal, clearCart } = useCart()
@@ -214,79 +212,114 @@ export default function Checkout() {
     true,
   ][step]
 
-  // ── Place order: create OMS order then attach the Stripe pm_xxx token ──
-  const handlePlaceOrder = async () => {
-    setSubmitting(true)
-    setError(null)
+// ─────────────────────────────────────────────────────────────────────────────
+// DROP-IN REPLACEMENT for handlePlaceOrder in Checkout.jsx
+//
+// Changes vs previous version:
+//  1. paymentInfo is passed directly to createOrder (no separate changeOrder)
+//  2. saveAuthorizedPaymentToOMS is no longer called
+//  3. resolveDefaultHolds still called after order creation
+// ─────────────────────────────────────────────────────────────────────────────
 
-    try {
-      let addr
-      if (bopis) {
-        const selectedStore = stores.find(s => s.ShipNode === selStore)
-        const info = selectedStore?.ShipNodePersonInfo || {}
-        addr = {
-          address1: info.AddressLine1 || 'Store Pickup',
-          city: info.City || selStore,
-          state: info.State || '',
-          zip: info.ZipCode || '00000',
-          country: info.Country || 'US',
-        }
-      } else {
-        addr = shipping
+// Import change at top of Checkout.jsx — remove saveAuthorizedPaymentToOMS:
+// import { getStripe, tokenizeCard, createStripeAuthorization, handle3DSChallenge } from '../api/payment.js'
+// import { resolveDefaultHolds } from '../api/payment.js'   ← keep this one
+
+const handlePlaceOrder = async () => {
+  setSubmitting(true)
+  setError(null)
+
+  try {
+    let addr
+    if (bopis) {
+      const selectedStore = stores.find(s => s.ShipNode === selStore)
+      const info = selectedStore?.ShipNodePersonInfo || {}
+      addr = {
+        address1: info.AddressLine1 || 'Store Pickup',
+        city: info.City || selStore,
+        state: info.State || '',
+        zip: info.ZipCode || '00000',
+        country: info.Country || 'US',
       }
-
-      const result = await createOrder({
-        cartItems: items,
-        customerInfo: customer,
-        shippingAddress: addr,
-        shipNode: bopis ? selStore : undefined,
-        customerId: user?.customerID,
-      })
-
-      const orderNo = result?.OrderNo || result?.OrderHeaderKey
-
-      // Attach the Stripe pm_xxx token to the order.
-      // OMS payment-collection agent will use this token to call Stripe and authorize.
-      if (paymentToken && orderNo) {
-        try {
-          await savePaymentTokenToOMS({
-            orderNo,
-            paymentToken,
-            amount: subtotal,
-            customerInfo: customer,
-          })
-          console.log('Stripe pm token stored in OMS for order:', orderNo)
-        } catch (payErr) {
-          console.warn('Failed to store Stripe token in OMS:', payErr.message)
-        }
-      }
-
-      clearCart()
-      navigate('/order-confirmation', {
-        state: {
-          order: result,
-          orderNo,
-          customer,
-          items,
-          total,
-          isBopis: bopis,
-          storeName: bopis ? stores.find(s => s.ShipNode === selStore)?.Description : null,
-          paymentToken,
-          cardSummary,
-          paymentGateway: 'STRIPE',
-        },
-      })
-    } catch (e) {
-      let msg = 'Order creation failed'
-      const errData = e.response?.data
-      if (Array.isArray(errData) && errData[0]?.ErrorDescription) msg = errData[0].ErrorDescription
-      else if (errData?.errorDescription) msg = errData.errorDescription
-      else if (e.message) msg = e.message
-      setError(msg)
-    } finally {
-      setSubmitting(false)
+    } else {
+      addr = shipping
     }
+
+    // Step 1: Authorize at Stripe (frontend creates PaymentIntent, capture_method=manual)
+    console.log('Authorizing at Stripe…')
+    let stripeAuth = await createStripeAuthorization({
+      paymentToken,
+      amount: subtotal,
+      customerInfo: customer,
+      shippingAddress: addr,
+      orderRef: `aurora-${Date.now()}`,
+    })
+
+    // Step 1b: Handle 3DS if required
+    if (stripeAuth.status === 'requires_action') {
+      console.log('3DS required…')
+      const stripe = await getStripe()
+      const confirmedPI = await handle3DSChallenge({ stripe, clientSecret: stripeAuth.clientSecret })
+      stripeAuth = { ...stripeAuth, status: confirmedPI.status, paymentIntentId: confirmedPI.id }
+    }
+
+    if (stripeAuth.status !== 'requires_capture') {
+      throw new Error(`Stripe authorization failed: status=${stripeAuth.status}`)
+    }
+    console.log('Stripe authorized:', stripeAuth.paymentIntentId)
+
+    // Step 2: Create OMS order WITH payment block included
+    // ChargeSequence=1 and HoldAgainstBook=Y are set inside createOrder.
+    // Both CREATE_ORDER and AUTHORIZATION will be CHECKED immediately.
+    // Awaiting collections will show $250 so OMS generates CHARGE after invoice.
+    const result = await createOrder({
+      cartItems: items,
+      customerInfo: customer,
+      shippingAddress: addr,
+      shipNode: bopis ? selStore : undefined,
+      customerId: user?.customerID,
+      paymentInfo: {
+        paymentToken,                          // pm_xxx
+        paymentIntentId: stripeAuth.paymentIntentId,  // pi_xxx
+        amount: subtotal,
+      },
+    })
+
+    const orderNo = result?.OrderNo || result?.OrderHeaderKey
+    console.log('Order created with payment:', orderNo)
+
+    // Step 3: Resolve any auto-applied holds (fraud check, duplicate, etc.)
+    // if (orderNo) {
+    //   await resolveDefaultHolds(orderNo)
+    // }
+
+    clearCart()
+    navigate('/order-confirmation', {
+      state: {
+        order: result,
+        orderNo,
+        customer,
+        items,
+        total,
+        isBopis: bopis,
+        storeName: bopis ? stores.find(s => s.ShipNode === selStore)?.Description : null,
+        paymentToken,
+        paymentIntentId: stripeAuth.paymentIntentId,
+        cardSummary,
+        paymentGateway: 'STRIPE',
+      },
+    })
+  } catch (e) {
+    let msg = 'Order creation failed'
+    const errData = e.response?.data
+    if (Array.isArray(errData) && errData[0]?.ErrorDescription) msg = errData[0].ErrorDescription
+    else if (errData?.errorDescription) msg = errData.errorDescription
+    else if (e.message) msg = e.message
+    setError(msg)
+  } finally {
+    setSubmitting(false)
   }
+}
 
   if (!items.length) {
     return (
@@ -304,7 +337,6 @@ export default function Checkout() {
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-10 animate-fade-in">
         <h1 className="font-display text-3xl font-bold text-slate-900 mb-8">Checkout</h1>
 
-        {/* Step indicator */}
         <div className="flex items-center gap-3 mb-8 overflow-x-auto">
           {STEPS.map((s, i) => (
             <React.Fragment key={s}>
@@ -326,7 +358,6 @@ export default function Checkout() {
         <div className="grid lg:grid-cols-[1fr,360px] gap-8">
           <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-6">
 
-            {/* ── Step 0: Customer Info ── */}
             {step === 0 && (
               <div className="space-y-5">
                 <h2 className="font-display text-xl font-bold text-slate-900">Customer Information</h2>
@@ -339,7 +370,6 @@ export default function Checkout() {
               </div>
             )}
 
-            {/* ── Step 1: Shipping ── */}
             {step === 1 && (
               <div className="space-y-5">
                 <h2 className="font-display text-xl font-bold text-slate-900">Shipping or Pickup</h2>
@@ -423,7 +453,6 @@ export default function Checkout() {
               </div>
             )}
 
-            {/* ── Step 2: Payment ── */}
             {step === 2 && (
               <div className="space-y-5">
                 <h2 className="font-display text-xl font-bold text-slate-900">Payment</h2>
@@ -452,7 +481,7 @@ export default function Checkout() {
                         <p className="text-xs text-green-600 font-mono break-all">Token: {paymentToken}</p>
                       </div>
                       <p className="text-xs text-green-600">
-                        OMS will authorize ${subtotal.toFixed(2)} using this token when your order is confirmed.
+                        Stripe will authorize ${subtotal.toFixed(2)} when you click Place Order.
                       </p>
                     </div>
                   </div>
@@ -466,7 +495,6 @@ export default function Checkout() {
               </div>
             )}
 
-            {/* ── Step 3: Review ── */}
             {step === 3 && (
               <div className="space-y-5">
                 <h2 className="font-display text-xl font-bold text-slate-900">Review Order</h2>
@@ -494,7 +522,7 @@ export default function Checkout() {
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-400 font-mono mb-2">Payment</p>
                   <p className="text-sm text-slate-800">
                     {cardSummary?.brand?.toUpperCase()} ···· {cardSummary?.last4}
-                    <span className="ml-2 text-xs text-slate-500">(token saved · OMS authorizes on order)</span>
+                    <span className="ml-2 text-xs text-slate-500">(will authorize on order placement)</span>
                   </p>
                 </div>
 
@@ -506,7 +534,6 @@ export default function Checkout() {
               </div>
             )}
 
-            {/* Navigation */}
             <div className="flex justify-between mt-8 pt-6 border-t border-slate-200">
               {step > 0 ? (
                 <button onClick={() => setStep(s => s - 1)}
@@ -533,7 +560,6 @@ export default function Checkout() {
             </div>
           </div>
 
-          {/* Order Summary sidebar */}
           <div>
             <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sticky top-24">
               <h3 className="font-display text-xl font-bold text-slate-900 mb-5">Order Summary</h3>

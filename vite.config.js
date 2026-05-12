@@ -14,7 +14,6 @@ export default defineConfig({
         secure: false,
       },
 
-      // Razorpay — kept in case still referenced elsewhere
       '/razorpay-api': {
         target: 'https://api.razorpay.com',
         changeOrigin: true,
@@ -22,12 +21,26 @@ export default defineConfig({
         secure: true,
       },
 
-      // Stripe — proxied so the secret key header never leaves your machine
       '/stripe-api': {
         target: 'https://api.stripe.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/stripe-api/, ''),
         secure: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            // Strip browser cookies — Stripe doesn't need them and they confuse the API
+            proxyReq.removeHeader('cookie')
+            
+            // Force the Authorization header through (some proxies drop it)
+            if (req.headers.authorization) {
+              proxyReq.setHeader('Authorization', req.headers.authorization)
+            }
+            
+            // Strip browser-specific headers that Stripe doesn't need
+            proxyReq.removeHeader('origin')
+            proxyReq.removeHeader('referer')
+          })
+        },
       },
     },
   },
